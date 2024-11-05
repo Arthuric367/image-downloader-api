@@ -48,25 +48,62 @@ app.post('/api/fetch-images', async (req, res) => {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       },
-      timeout: 10000
+      timeout: 10000,
+      maxRedirects: 5
     });
 
     const $ = cheerio.load(response.data);
     const images = new Set();
 
+    // Find all img tags
     $('img').each((_, element) => {
-      const src = $(element).attr('src');
-      if (src && /\.(jpeg|jpg|png|gif|webp)$/i.test(src)) {
+      // Check multiple possible image attributes
+      const srcAttrs = ['src', 'data-src', 'data-original', 'data-lazy-src'];
+      let imageUrl = null;
+
+      for (const attr of srcAttrs) {
+        const src = $(element).attr(attr);
+        if (src) {
+          try {
+            // Convert relative URLs to absolute
+            imageUrl = new URL(src, url).href;
+            break;
+          } catch (e) {
+            console.error('Invalid URL:', src);
+          }
+        }
+      }
+
+      if (imageUrl && /\.(jpe?g|png|gif|webp)(\?.*)?$/i.test(imageUrl)) {
+        images.add(imageUrl);
+      }
+    });
+
+    // Also check for background images in style attributes
+    $('[style*="background"]').each((_, element) => {
+      const style = $(element).attr('style');
+      const match = style?.match(/url\(['"]?(.*?)['"]?\)/);
+      if (match && match[1]) {
         try {
-          const absoluteUrl = new URL(src, url).href;
-          images.add(absoluteUrl);
+          const imageUrl = new URL(match[1], url).href;
+          if (/\.(jpe?g|png|gif|webp)(\?.*)?$/i.test(imageUrl)) {
+            images.add(imageUrl);
+          }
         } catch (e) {
-          console.error('Invalid URL:', src);
+          console.error('Invalid background URL:', match[1]);
         }
       }
     });
 
-    res.json({ images: Array.from(images) });
+    const imageArray = Array.from(images);
+    if (imageArray.length === 0) {
+      return res.status(404).json({ 
+        error: 'No images found',
+        message: 'No valid images were found on the provided URL.'
+      });
+    }
+
+    res.json({ images: imageArray });
   } catch (error) {
     console.error('Server error:', error);
     res.status(500).json({ 
@@ -103,10 +140,13 @@ app.post('/api/download-all', async (req, res) => {
           url: urls[i],
           method: 'GET',
           responseType: 'stream',
-          timeout: 10000
+          timeout: 10000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+          }
         });
 
-        const fileName = `${folderName}/${i + 1}_${path.basename(urls[i])}`;
+        const fileName = `${folderName}/${i + 1}_${path.basename(urls[i].split('?')[0])}`;
         archive.append(response.data, { name: fileName });
       } catch (error) {
         console.error(`Failed to download image ${urls[i]}:`, error);
@@ -139,11 +179,18 @@ app.get('/api/download', async (req, res) => {
       responseType: 'stream',
       timeout: 10000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8'
       }
     });
 
-    res.setHeader('Content-Type', response.headers['content-type']);
+    // Verify content type is an image
+    const contentType = response.headers['content-type'];
+    if (!contentType?.startsWith('image/')) {
+      return res.status(400).json({ error: 'URL does not point to an image' });
+    }
+
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', 'attachment');
 
     response.data.pipe(res);
