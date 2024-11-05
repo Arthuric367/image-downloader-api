@@ -4,25 +4,42 @@ import axios from 'axios';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const isDev = process.env.NODE_ENV !== 'production';
 
-// Enable CORS with specific origins
-const allowedOrigins = [
-  'https://celebrated-pastelito-a57194.netlify.app',
-  'http://localhost:5173',
-  'http://localhost:4173',
-  'http://localhost:3000'
-];
-
-app.use(cors({
+// CORS configuration
+const corsOptions = {
   origin: function(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error(`Origin ${origin} not allowed by CORS`));
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) {
+      return callback(null, true);
     }
-  }
-}));
 
+    try {
+      const hostname = new URL(origin).hostname;
+      
+      // Allow all localhost requests in development
+      if (isDev && hostname === 'localhost') {
+        return callback(null, true);
+      }
+      
+      // In production, only allow specific origins
+      const allowedOrigins = [
+        'celebrated-pastelito-a57194.netlify.app'
+      ];
+      
+      if (allowedOrigins.some(domain => origin.includes(domain))) {
+        return callback(null, true);
+      }
+      
+      callback(new Error('Not allowed by CORS'));
+    } catch (error) {
+      callback(new Error('Invalid origin'));
+    }
+  },
+  credentials: true
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Health check endpoints
