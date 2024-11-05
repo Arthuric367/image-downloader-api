@@ -2,37 +2,29 @@ import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
 import { PassThrough } from 'stream';
+import cheerio from 'cheerio';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const isDev = process.env.NODE_ENV !== 'production';
 
-// CORS configuration with improved headers
 const corsOptions = {
   origin: function(origin, callback) {
-    if (!origin) {
+    if (!origin || isDev) {
       return callback(null, true);
     }
 
-    try {
-      const hostname = new URL(origin).hostname;
-      
-      if (isDev && hostname === 'localhost') {
-        return callback(null, true);
-      }
-      
-      const allowedOrigins = [
-        'celebrated-pastelito-a57194.netlify.app'
-      ];
-      
-      if (allowedOrigins.some(domain => origin.includes(domain))) {
-        return callback(null, true);
-      }
-      
-      callback(new Error('Not allowed by CORS'));
-    } catch (error) {
-      callback(new Error('Invalid origin'));
+    const allowedOrigins = [
+      'celebrated-pastelito-a57194.netlify.app',
+      'localhost',
+      '127.0.0.1'
+    ];
+
+    if (allowedOrigins.some(domain => origin.includes(domain))) {
+      return callback(null, true);
     }
+
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   exposedHeaders: ['Content-Disposition']
@@ -54,12 +46,13 @@ const logError = (error, context) => {
   });
 };
 
-// Content type detection
 const getContentType = (url, data) => {
   const ext = url.split('?')[0].split('.').pop().toLowerCase();
   if (/^(jpg|jpeg|png|gif|webp)$/.test(ext)) {
     return `image/${ext === 'jpg' ? 'jpeg' : ext}`;
   }
+  
+  if (!data) return 'application/octet-stream';
   
   const signature = data.slice(0, 4).toString('hex');
   if (signature.startsWith('89504e47')) return 'image/png';
@@ -69,23 +62,19 @@ const getContentType = (url, data) => {
   return 'application/octet-stream';
 };
 
-// Download with retry and monitoring
 const downloadWithRetry = async (url, attempt = 1, maxAttempts = 3) => {
   try {
     const response = await axios({
       url,
       method: 'GET',
       responseType: 'arraybuffer',
-      timeout: 15000,
+      timeout: 30000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
       },
       validateStatus: status => status === 200,
-      onDownloadProgress: (progressEvent) => {
-        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-        console.log(`Download progress for ${url}: ${percentCompleted}%`);
-      }
+      maxRedirects: 5
     });
 
     return response.data;
@@ -101,7 +90,6 @@ const downloadWithRetry = async (url, attempt = 1, maxAttempts = 3) => {
   }
 };
 
-// Memory usage monitoring
 const logMemoryUsage = () => {
   const used = process.memoryUsage();
   console.log('Memory usage:', {
@@ -109,6 +97,55 @@ const logMemoryUsage = () => {
     heapUsed: `${Math.round(used.heapUsed / 1024 / 1024)} MB`
   });
 };
+
+app.post('/api/fetch-images', async (req, res) => {
+  try {
+    const { url } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+
+    console.log('Fetching images from:', url);
+
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      },
+      timeout: 30000,
+      maxRedirects: 5
+    });
+
+    const $ = cheerio.load(response.data);
+    const images = new Set();
+
+    // Find all img tags
+    $('img').each((_, element) => {
+      const src = $(element).attr('src');
+      if (src) {
+        try {
+          const imageUrl = new URL(src, url).href;
+          if (/\.(jpe?g|png|gif|webp)(\?.*)?$/i.test(imageUrl)) {
+            images.add(imageUrl);
+          }
+        } catch (e) {
+          console.error('Invalid image URL:', src);
+        }
+      }
+    });
+
+    const imageArray = Array.from(images);
+    res.json({ images: imageArray });
+
+  } catch (error) {
+    logError(error, 'Fetch images error');
+    res.status(500).json({
+      error: 'Failed to fetch images',
+      details: error.message
+    });
+  }
+});
 
 app.get('/api/download', async (req, res) => {
   try {
@@ -156,8 +193,6 @@ app.get('/api/download', async (req, res) => {
     }
   }
 });
-
-// ... rest of your existing endpoints ...
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
