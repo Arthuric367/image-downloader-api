@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
 import { PassThrough } from 'stream';
-import cheerio from 'cheerio';
+import * as cheerio from 'cheerio';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
