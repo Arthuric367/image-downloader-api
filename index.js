@@ -1,29 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
-import cheerio from 'cheerio';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import * as cheerio from 'cheerio';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable CORS for development
-const allowedOrigins = ['http://localhost:5173', 'http://localhost:4173', process.env.FRONTEND_URL].filter(Boolean);
-
-app.use(cors({
-  origin: function(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  }
-}));
-
+// Enable CORS for all origins in development
+app.use(cors());
 app.use(express.json());
 
 // Health check endpoint
@@ -64,10 +48,7 @@ app.post('/api/fetch-images', async (req, res) => {
     res.json({ images: Array.from(images) });
   } catch (error) {
     console.error('Server error:', error);
-    res.status(500).json({ 
-      error: 'Failed to fetch images',
-      details: error.message 
-    });
+    res.status(500).json({ error: 'Failed to fetch images' });
   }
 });
 
@@ -95,20 +76,8 @@ app.get('/api/download', async (req, res) => {
     response.data.pipe(res);
   } catch (error) {
     console.error('Download error:', error);
-    res.status(500).json({ 
-      error: 'Failed to download image',
-      details: error.message 
-    });
+    res.status(500).json({ error: 'Failed to download image' });
   }
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ 
-    error: 'Something broke!',
-    details: err.message 
-  });
 });
 
 app.listen(PORT, () => {
