@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { Image as ImageIcon, AlertCircle, Download } from 'lucide-react';
 import ImageList from './components/ImageList';
-
-const API_URL = import.meta.env.VITE_API_URL || 'https://image-downloader-api-iu58.onrender.com';
+import { fetchImages, downloadImage } from './utils/imageUtils';
 
 function App() {
   const [url, setUrl] = useState('');
@@ -10,80 +9,30 @@ function App() {
   const [error, setError] = useState('');
   const [images, setImages] = useState<string[]>([]);
 
-  const fetchImages = async () => {
+  const handleFetchImages = async () => {
     setLoading(true);
     setError('');
     setImages([]);
     
     try {
-      const response = await fetch(`${API_URL}/api/fetch-images`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify({ url }),
-      });
+      const fetchedImages = await fetchImages(url);
+      setImages(fetchedImages);
       
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error('Server returned non-JSON response');
-      }
-
-      const data = await response.json();
-      
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to fetch images');
-      }
-
-      if (!Array.isArray(data.images)) {
-        throw new Error('Invalid response format');
-      }
-
-      setImages(data.images);
-      
-      if (data.images.length === 0) {
+      if (fetchedImages.length === 0) {
         setError('No images found on this page');
       }
     } catch (err) {
-      console.error('Fetch error:', err);
       setError(err instanceof Error ? err.message : 'Failed to fetch images');
     } finally {
       setLoading(false);
     }
   };
 
-  const downloadImage = async (imageUrl: string) => {
+  const handleDownload = async (imageUrl: string) => {
     try {
-      const response = await fetch(`${API_URL}/api/download?url=${encodeURIComponent(imageUrl)}`, {
-        headers: {
-          'Accept': 'image/*',
-        },
-      });
-
-      if (!response.ok) {
-        const contentType = response.headers.get('content-type');
-        if (contentType?.includes('application/json')) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || 'Download failed');
-        }
-        throw new Error('Download failed');
-      }
-      
-      const blob = await response.blob();
-      const blobUrl = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      const fileName = imageUrl.split('/').pop()?.split('?')[0] || 'image';
-      
-      a.href = blobUrl;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(blobUrl);
+      await downloadImage(imageUrl);
     } catch (err) {
-      console.error('Download error:', err);
-      setError('Failed to download image');
+      setError(err instanceof Error ? err.message : 'Failed to download image');
     }
   };
 
@@ -124,7 +73,7 @@ function App() {
 
             <div className="flex gap-4">
               <button
-                onClick={fetchImages}
+                onClick={handleFetchImages}
                 disabled={loading || !url}
                 className={`flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-lg text-white font-medium transition
                   ${loading || !url 
@@ -137,7 +86,7 @@ function App() {
             </div>
           </div>
 
-          <ImageList images={images} onDownload={downloadImage} />
+          <ImageList images={images} onDownload={handleDownload} />
         </div>
       </div>
     </div>
