@@ -9,7 +9,6 @@ const isDev = process.env.NODE_ENV !== 'production';
 // CORS configuration
 const corsOptions = {
   origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) {
       return callback(null, true);
     }
@@ -17,12 +16,10 @@ const corsOptions = {
     try {
       const hostname = new URL(origin).hostname;
       
-      // Allow all localhost requests in development
       if (isDev && hostname === 'localhost') {
         return callback(null, true);
       }
       
-      // In production, only allow specific origins
       const allowedOrigins = [
         'celebrated-pastelito-a57194.netlify.app'
       ];
@@ -51,14 +48,37 @@ app.get('/health', (req, res) => {
   res.json({ status: 'healthy', message: 'Image Downloader API is running' });
 });
 
-const PEXELS_API_KEY = process.env.PEXELS_API_KEY || 'your_pexels_api_key';
 const customAxios = axios.create({
   timeout: 30000,
   headers: {
-    'Authorization': PEXELS_API_KEY,
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
   }
 });
+
+// Helper function to download a single image with retries
+async function downloadImage(url, retries = 2) {
+  try {
+    const response = await customAxios({
+      url,
+      method: 'GET',
+      responseType: 'arraybuffer',
+      timeout: 15000,
+      headers: {
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+      },
+      validateStatus: status => status === 200
+    });
+
+    return response.data;
+  } catch (error) {
+    if (retries > 0) {
+      // Wait for 1 second before retrying
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      return downloadImage(url, retries - 1);
+    }
+    throw error;
+  }
+}
 
 app.post('/api/fetch-images', async (req, res) => {
   try {
@@ -68,38 +88,6 @@ app.post('/api/fetch-images', async (req, res) => {
       return res.status(400).json({ error: 'URL is required' });
     }
 
-    // Check if it's a Pexels URL
-    if (url.includes('pexels.com')) {
-      try {
-        // Extract photo ID from URL if possible
-        const photoId = url.match(/photos\/(\d+)/)?.[1];
-        
-        if (photoId) {
-          const response = await customAxios.get(`https://api.pexels.com/v1/photos/${photoId}`);
-          const photo = response.data;
-          
-          return res.json({
-            images: [photo.src.original]
-          });
-        } else {
-          // If no specific photo ID, return curated photos
-          const response = await customAxios.get('https://api.pexels.com/v1/curated?per_page=15');
-          const photos = response.data.photos;
-          
-          return res.json({
-            images: photos.map(photo => photo.src.original)
-          });
-        }
-      } catch (error) {
-        console.error('Pexels API error:', error);
-        return res.status(500).json({
-          error: 'Failed to fetch images from Pexels',
-          details: error.message
-        });
-      }
-    }
-
-    // For non-Pexels URLs, try to fetch normally
     const response = await customAxios.get(url);
     const images = [];
 
@@ -144,32 +132,92 @@ app.get('/api/download', async (req, res) => {
 
     console.log('Downloading image:', url);
 
-    const response = await customAxios({
-      url,
-      method: 'GET',
-      responseType: 'stream',
-      timeout: 15000,
-      headers: {
-        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-      }
-    });
-
-    // Verify content type is an image
-    const contentType = response.headers['content-type'];
-    if (!contentType?.startsWith('image/')) {
-      return res.status(400).json({ error: 'URL does not point to an image' });
-    }
+    const imageData = await downloadImage(url);
+    
+    // Get file extension from URL
+    const ext = url.split('?')[0].split('.').pop().toLowerCase();
+    const contentType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
 
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', 'attachment');
-
-    response.data.pipe(res);
+    res.send(imageData);
   } catch (error) {
     console.error('Download error:', error);
     res.status(500).json({
       error: 'Failed to download image',
       details: error.message
     });
+  }
+});
+
+app.post('/api/download-all', async (req, res) => {
+  try {
+    const { urls } = req.body;
+    
+    if (!urls || !Array.isArray(urls) || urls.length === 0) {
+      return res.status(400).json({ error: 'Valid URLs array is required' });
+    }
+
+    // Download images in parallel with a concurrency limit
+    const concurrencyLimit = 5;
+    const results = [];
+    
+    for (let i = 0; i < urls.length; i += concurrencyLimit) {
+      const batch = urls.slice(i, i + concurrencyLimit);
+      const batchPromises = batch.map(async (url, index) => {
+        try {
+          const imageData = await downloadImage(url);
+          const ext = url.split('?')[0].split('.').pop().toLowerCase();
+          return {
+            success: true,
+            index: i + index,
+            data: imageData,
+            ext
+          };
+        } catch (error) {
+          console.error(`Failed to download image ${i + index}:`, error.message);
+          return {
+            success: false,
+            index: i + index,
+            error: error.message
+          };
+        }
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+    }
+
+    // Filter successful downloads
+    const successfulDownloads = results.filter(r => r.success);
+    
+    if (successfulDownloads.length === 0) {
+      return res.status(500).json({ error: 'Failed to download any images' });
+    }
+
+    // Send successful downloads as a ZIP file
+    const archiver = (await import('archiver')).default;
+    const archive = archiver('zip', { zlib: { level: 9 }});
+    
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="images.zip"');
+    
+    archive.pipe(res);
+
+    successfulDownloads.forEach(result => {
+      const fileName = `image-${String(result.index + 1).padStart(3, '0')}.${result.ext}`;
+      archive.append(Buffer.from(result.data), { name: fileName });
+    });
+
+    await archive.finalize();
+  } catch (error) {
+    console.error('Download all error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Failed to create zip file',
+        details: error.message
+      });
+    }
   }
 });
 
