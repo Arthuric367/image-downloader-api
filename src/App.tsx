@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { Image as ImageIcon, AlertCircle, Download } from 'lucide-react';
 import ImageList from './components/ImageList';
 
-// Get the API URL from environment or default to production URL
 const API_URL = import.meta.env.VITE_API_URL || 'https://image-downloader-api-iu58.onrender.com';
 
 function App() {
@@ -17,20 +16,28 @@ function App() {
     setImages([]);
     
     try {
-      console.log('Fetching from:', `${API_URL}/api/fetch-images`);
       const response = await fetch(`${API_URL}/api/fetch-images`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Accept': 'application/json',
         },
         body: JSON.stringify({ url }),
       });
       
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('Server returned non-JSON response');
+      }
+
       const data = await response.json();
-      console.log('Response:', data);
       
       if (!response.ok) {
         throw new Error(data.error || 'Failed to fetch images');
+      }
+
+      if (!Array.isArray(data.images)) {
+        throw new Error('Invalid response format');
       }
 
       setImages(data.images);
@@ -40,7 +47,7 @@ function App() {
       }
     } catch (err) {
       console.error('Fetch error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to fetch images. Please check the console for details.');
+      setError(err instanceof Error ? err.message : 'Failed to fetch images');
     } finally {
       setLoading(false);
     }
@@ -48,13 +55,25 @@ function App() {
 
   const downloadImage = async (imageUrl: string) => {
     try {
-      const response = await fetch(`${API_URL}/api/download?url=${encodeURIComponent(imageUrl)}`);
-      if (!response.ok) throw new Error('Download failed');
+      const response = await fetch(`${API_URL}/api/download?url=${encodeURIComponent(imageUrl)}`, {
+        headers: {
+          'Accept': 'image/*',
+        },
+      });
+
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type');
+        if (contentType?.includes('application/json')) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Download failed');
+        }
+        throw new Error('Download failed');
+      }
       
       const blob = await response.blob();
       const blobUrl = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
-      const fileName = imageUrl.split('/').pop() || 'image';
+      const fileName = imageUrl.split('/').pop()?.split('?')[0] || 'image';
       
       a.href = blobUrl;
       a.download = fileName;
@@ -65,47 +84,6 @@ function App() {
     } catch (err) {
       console.error('Download error:', err);
       setError('Failed to download image');
-    }
-  };
-
-  const downloadAllImages = async () => {
-    try {
-      // Create folder name with current date and time
-      const now = new Date();
-      const folderName = now.toLocaleString('en-GB', {
-        year: '2-digit',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-      }).replace(/[/:]/g, '').replace(',', ' ');
-
-      const response = await fetch(`${API_URL}/api/download-all`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          urls: images,
-          folderName
-        }),
-      });
-
-      if (!response.ok) throw new Error('Download failed');
-
-      const blob = await response.blob();
-      const blobUrl = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = `${folderName}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(blobUrl);
-    } catch (err) {
-      console.error('Batch download error:', err);
-      setError('Failed to download images');
     }
   };
 
@@ -156,16 +134,6 @@ function App() {
                 <ImageIcon className="w-5 h-5" />
                 {loading ? 'Processing...' : 'Fetch Images'}
               </button>
-
-              {images.length > 0 && (
-                <button
-                  onClick={downloadAllImages}
-                  className="flex items-center justify-center gap-2 px-6 py-3 rounded-lg text-white font-medium bg-green-600 hover:bg-green-700 transition"
-                >
-                  <Download className="w-5 h-5" />
-                  Download All
-                </button>
-              )}
             </div>
           </div>
 
