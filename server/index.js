@@ -9,7 +9,8 @@ const PORT = process.env.PORT || 3000;
 const allowedOrigins = [
   'https://celebrated-pastelito-a57194.netlify.app',
   'http://localhost:5173',
-  'http://localhost:4173'
+  'http://localhost:4173',
+  'http://localhost:3000'
 ];
 
 app.use(cors({
