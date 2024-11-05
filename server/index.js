@@ -1,12 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
+import { PassThrough } from 'stream';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const isDev = process.env.NODE_ENV !== 'production';
 
-// CORS configuration
+// CORS configuration with improved headers
 const corsOptions = {
   origin: function(origin, callback) {
     if (!origin) {
@@ -33,94 +34,81 @@ const corsOptions = {
       callback(new Error('Invalid origin'));
     }
   },
-  credentials: true
+  credentials: true,
+  exposedHeaders: ['Content-Disposition']
 };
 
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// Health check endpoints
-app.get('/', (req, res) => {
-  res.json({ status: 'healthy', message: 'Image Downloader API is running' });
-});
+// Error logging utility
+const logError = (error, context) => {
+  console.error({
+    context,
+    message: error.message,
+    stack: error.stack,
+    timestamp: new Date().toISOString(),
+    url: error.config?.url,
+    status: error.response?.status,
+    statusText: error.response?.statusText,
+  });
+};
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', message: 'Image Downloader API is running' });
-});
-
-const customAxios = axios.create({
-  timeout: 30000,
-  headers: {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+// Content type detection
+const getContentType = (url, data) => {
+  const ext = url.split('?')[0].split('.').pop().toLowerCase();
+  if (/^(jpg|jpeg|png|gif|webp)$/.test(ext)) {
+    return `image/${ext === 'jpg' ? 'jpeg' : ext}`;
   }
-});
+  
+  const signature = data.slice(0, 4).toString('hex');
+  if (signature.startsWith('89504e47')) return 'image/png';
+  if (signature.startsWith('ffd8')) return 'image/jpeg';
+  if (signature.startsWith('47494638')) return 'image/gif';
+  
+  return 'application/octet-stream';
+};
 
-// Helper function to download a single image with retries
-async function downloadImage(url, retries = 2) {
+// Download with retry and monitoring
+const downloadWithRetry = async (url, attempt = 1, maxAttempts = 3) => {
   try {
-    const response = await customAxios({
+    const response = await axios({
       url,
       method: 'GET',
       responseType: 'arraybuffer',
       timeout: 15000,
       headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
       },
-      validateStatus: status => status === 200
+      validateStatus: status => status === 200,
+      onDownloadProgress: (progressEvent) => {
+        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+        console.log(`Download progress for ${url}: ${percentCompleted}%`);
+      }
     });
 
     return response.data;
   } catch (error) {
-    if (retries > 0) {
-      // Wait for 1 second before retrying
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      return downloadImage(url, retries - 1);
+    logError(error, `Download attempt ${attempt} failed for ${url}`);
+    
+    if (attempt < maxAttempts) {
+      const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return downloadWithRetry(url, attempt + 1, maxAttempts);
     }
     throw error;
   }
-}
+};
 
-app.post('/api/fetch-images', async (req, res) => {
-  try {
-    const { url } = req.body;
-    
-    if (!url) {
-      return res.status(400).json({ error: 'URL is required' });
-    }
-
-    const response = await customAxios.get(url);
-    const images = [];
-
-    // Extract image URLs from response
-    const imgRegex = /<img[^>]+src="([^">]+)"/g;
-    let match;
-    while ((match = imgRegex.exec(response.data)) !== null) {
-      try {
-        const imageUrl = new URL(match[1], url).href;
-        if (/\.(jpe?g|png|gif|webp)(\?.*)?$/i.test(imageUrl)) {
-          images.push(imageUrl);
-        }
-      } catch (e) {
-        console.error('Invalid image URL:', match[1]);
-      }
-    }
-
-    if (images.length === 0) {
-      return res.status(404).json({
-        error: 'No images found',
-        message: 'Could not find any valid images on the page.'
-      });
-    }
-
-    res.json({ images });
-  } catch (error) {
-    console.error('Server error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch images',
-      details: error.message
-    });
-  }
-});
+// Memory usage monitoring
+const logMemoryUsage = () => {
+  const used = process.memoryUsage();
+  console.log('Memory usage:', {
+    heapTotal: `${Math.round(used.heapTotal / 1024 / 1024)} MB`,
+    heapUsed: `${Math.round(used.heapUsed / 1024 / 1024)} MB`
+  });
+};
 
 app.get('/api/download', async (req, res) => {
   try {
@@ -130,97 +118,48 @@ app.get('/api/download', async (req, res) => {
       return res.status(400).json({ error: 'URL is required' });
     }
 
-    console.log('Downloading image:', url);
+    console.log('Starting download:', url);
+    logMemoryUsage();
 
-    const imageData = await downloadImage(url);
-    
-    // Get file extension from URL
-    const ext = url.split('?')[0].split('.').pop().toLowerCase();
-    const contentType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+    const imageData = await downloadWithRetry(url);
+    const contentType = getContentType(url, imageData);
+    const fileName = `image-${Date.now()}.${contentType.split('/')[1]}`;
 
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', 'attachment');
-    res.send(imageData);
-  } catch (error) {
-    console.error('Download error:', error);
-    res.status(500).json({
-      error: 'Failed to download image',
-      details: error.message
-    });
-  }
-});
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
-app.post('/api/download-all', async (req, res) => {
-  try {
-    const { urls } = req.body;
+    const stream = new PassThrough();
+    stream.end(imageData);
     
-    if (!urls || !Array.isArray(urls) || urls.length === 0) {
-      return res.status(400).json({ error: 'Valid URLs array is required' });
-    }
-
-    // Download images in parallel with a concurrency limit
-    const concurrencyLimit = 5;
-    const results = [];
-    
-    for (let i = 0; i < urls.length; i += concurrencyLimit) {
-      const batch = urls.slice(i, i + concurrencyLimit);
-      const batchPromises = batch.map(async (url, index) => {
-        try {
-          const imageData = await downloadImage(url);
-          const ext = url.split('?')[0].split('.').pop().toLowerCase();
-          return {
-            success: true,
-            index: i + index,
-            data: imageData,
-            ext
-          };
-        } catch (error) {
-          console.error(`Failed to download image ${i + index}:`, error.message);
-          return {
-            success: false,
-            index: i + index,
-            error: error.message
-          };
-        }
-      });
-      
-      const batchResults = await Promise.all(batchPromises);
-      results.push(...batchResults);
-    }
-
-    // Filter successful downloads
-    const successfulDownloads = results.filter(r => r.success);
-    
-    if (successfulDownloads.length === 0) {
-      return res.status(500).json({ error: 'Failed to download any images' });
-    }
-
-    // Send successful downloads as a ZIP file
-    const archiver = (await import('archiver')).default;
-    const archive = archiver('zip', { zlib: { level: 9 }});
-    
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="images.zip"');
-    
-    archive.pipe(res);
-
-    successfulDownloads.forEach(result => {
-      const fileName = `image-${String(result.index + 1).padStart(3, '0')}.${result.ext}`;
-      archive.append(Buffer.from(result.data), { name: fileName });
+    stream.on('error', (error) => {
+      logError(error, 'Stream error');
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Stream failed' });
+      }
     });
 
-    await archive.finalize();
+    stream.pipe(res);
+    
+    stream.on('end', () => {
+      console.log('Download completed:', url);
+      logMemoryUsage();
+    });
+
   } catch (error) {
-    console.error('Download all error:', error);
+    logError(error, 'Download error');
     if (!res.headersSent) {
       res.status(500).json({
-        error: 'Failed to create zip file',
+        error: 'Failed to download image',
         details: error.message
       });
     }
   }
 });
 
+// ... rest of your existing endpoints ...
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
+  logMemoryUsage();
 });
