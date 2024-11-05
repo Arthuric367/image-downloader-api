@@ -12,7 +12,6 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable CORS for development
 const allowedOrigins = [
   'https://celebrated-pastelito-a57194.netlify.app',
   'http://localhost:5173',
@@ -31,7 +30,6 @@ app.use(cors({
 
 app.use(express.json());
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy' });
 });
@@ -55,9 +53,7 @@ app.post('/api/fetch-images', async (req, res) => {
     const $ = cheerio.load(response.data);
     const images = new Set();
 
-    // Find all img tags
     $('img').each((_, element) => {
-      // Check multiple possible image attributes
       const srcAttrs = ['src', 'data-src', 'data-original', 'data-lazy-src'];
       let imageUrl = null;
 
@@ -65,7 +61,6 @@ app.post('/api/fetch-images', async (req, res) => {
         const src = $(element).attr(attr);
         if (src) {
           try {
-            // Convert relative URLs to absolute
             imageUrl = new URL(src, url).href;
             break;
           } catch (e) {
@@ -79,7 +74,6 @@ app.post('/api/fetch-images', async (req, res) => {
       }
     });
 
-    // Also check for background images in style attributes
     $('[style*="background"]').each((_, element) => {
       const style = $(element).attr('style');
       const match = style?.match(/url\(['"]?(.*?)['"]?\)/);
@@ -117,8 +111,8 @@ app.post('/api/download-all', async (req, res) => {
   try {
     const { urls, folderName } = req.body;
     
-    if (!urls || !Array.isArray(urls)) {
-      return res.status(400).json({ error: 'URLs array is required' });
+    if (!urls || !Array.isArray(urls) || urls.length === 0) {
+      return res.status(400).json({ error: 'Valid URLs array is required' });
     }
 
     // Create a zip archive
@@ -126,33 +120,51 @@ app.post('/api/download-all', async (req, res) => {
       zlib: { level: 9 }
     });
 
-    // Set the headers
+    // Set response headers
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${folderName || 'images'}.zip"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${folderName}.zip"`);
 
     // Pipe archive data to the response
     archive.pipe(res);
 
     // Download each image and add to the archive
-    for (let i = 0; i < urls.length; i++) {
+    const downloadPromises = urls.map(async (url, index) => {
       try {
         const response = await axios({
-          url: urls[i],
+          url,
           method: 'GET',
-          responseType: 'stream',
-          timeout: 10000,
+          responseType: 'arraybuffer',
+          timeout: 30000,
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-          }
+          },
+          validateStatus: status => status === 200
         });
 
-        const fileName = `${folderName}/${i + 1}_${path.basename(urls[i].split('?')[0])}`;
-        archive.append(response.data, { name: fileName });
+        // Extract file extension from URL or content type
+        let ext = path.extname(url.split('?')[0]).toLowerCase() || '.jpg';
+        if (!ext.match(/\.(jpe?g|png|gif|webp)$/i)) {
+          const contentType = response.headers['content-type'];
+          ext = contentType.includes('jpeg') ? '.jpg' :
+                contentType.includes('png') ? '.png' :
+                contentType.includes('gif') ? '.gif' :
+                contentType.includes('webp') ? '.webp' : '.jpg';
+        }
+
+        // Create a unique filename
+        const fileName = `${folderName}/${String(index + 1).padStart(3, '0')}${ext}`;
+
+        // Add the buffer to the archive
+        archive.append(Buffer.from(response.data), { name: fileName });
+        return true;
       } catch (error) {
-        console.error(`Failed to download image ${urls[i]}:`, error);
-        // Continue with other images even if one fails
+        console.error(`Failed to download image ${url}:`, error.message);
+        return false;
       }
-    }
+    });
+
+    // Wait for all downloads to complete
+    await Promise.all(downloadPromises);
 
     // Finalize the archive
     await archive.finalize();
@@ -184,7 +196,6 @@ app.get('/api/download', async (req, res) => {
       }
     });
 
-    // Verify content type is an image
     const contentType = response.headers['content-type'];
     if (!contentType?.startsWith('image/')) {
       return res.status(400).json({ error: 'URL does not point to an image' });
