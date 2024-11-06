@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
-import { corsOptions } from './src/config/cors.js';
-import imageRoutes from './src/routes/images.js';
+import { corsOptions } from './config/cors.js';
+import imageRoutes from './routes/images.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
