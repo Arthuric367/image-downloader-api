@@ -31,7 +31,7 @@ function App() {
   // New function to download all images as a ZIP file
   const handleDownloadAll = async () => {
     try {
-      const response = await fetch('/api/download-all', {
+      const response = await fetch('http://localhost:5000/api/download-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ urls: images })
