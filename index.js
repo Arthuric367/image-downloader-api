@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 const isDev = process.env.NODE_ENV !== 'production';
 
 const corsOptions = {
-  origin: function(origin, callback) {
+  origin: function (origin, callback) {
     if (!origin || isDev) {
       return callback(null, true);
     }
@@ -31,7 +31,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// Error logging utility
 const logError = (error, context) => {
   console.error({
     context,
@@ -121,9 +120,7 @@ app.post('/api/download-all', async (req, res) => {
     }
 
     // Set up ZIP archive
-    const archive = archiver('zip', {
-      zlib: { level: 5 }
-    });
+    const archive = archiver('zip', { zlib: { level: 5 } });
 
     // Set response headers
     res.setHeader('Content-Type', 'application/zip');
@@ -133,18 +130,21 @@ app.post('/api/download-all', async (req, res) => {
     archive.pipe(res);
 
     // Download and add each image to the archive
-    for (let i = 0; i < urls.length; i++) {
-      try {
-        const imageData = await downloadWithRetry(urls[i]);
-        const fileName = `image-${String(i + 1).padStart(3, '0')}.jpg`;
-        archive.append(imageData, { name: fileName });
-      } catch (error) {
-        console.error(`Failed to download image ${urls[i]}:`, error.message);
-        // Continue with next image even if one fails
+    const downloadAndAppendImages = async () => {
+      for (let i = 0; i < urls.length; i++) {
+        try {
+          const imageData = await downloadWithRetry(urls[i]);
+          const fileName = `image-${String(i + 1).padStart(3, '0')}.jpg`;
+          archive.append(imageData, { name: fileName });
+        } catch (error) {
+          console.error(`Failed to download image ${urls[i]}:`, error.message);
+        }
       }
-    }
+    };
 
-    // Finalize archive
+    await downloadAndAppendImages();
+
+    // Finalize archive once all images are appended
     await archive.finalize();
   } catch (error) {
     logError(error, 'Batch download error');
