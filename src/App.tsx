@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Image as ImageIcon, AlertCircle, Download } from 'lucide-react';
 import ImageList from './components/ImageList';
-import { fetchImages, downloadImage } from './utils/imageUtils';
+import { fetchImages } from './utils/imageUtils';
 
 function App() {
   const [url, setUrl] = useState('');
@@ -28,11 +28,26 @@ function App() {
     }
   };
 
-  const handleDownload = async (imageUrl: string) => {
+  // New function to download all images as a ZIP file
+  const handleDownloadAll = async () => {
     try {
-      await downloadImage(imageUrl);
+      const response = await fetch('/api/download-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: images })
+      });
+
+      if (!response.ok) throw new Error('Failed to download zip');
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `images-${Date.now()}.zip`;
+      a.click();
+      window.URL.revokeObjectURL(url);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to download image');
+      setError(err instanceof Error ? err.message : 'Failed to download images');
     }
   };
 
@@ -83,10 +98,21 @@ function App() {
                 <ImageIcon className="w-5 h-5" />
                 {loading ? 'Processing...' : 'Fetch Images'}
               </button>
+
+              {/* Button to download all images as a ZIP file */}
+              <button
+                onClick={handleDownloadAll}
+                disabled={loading || images.length === 0}
+                className="flex-1 flex items-center justify-center gap-2 px-6 py-3 rounded-lg text-white font-medium transition bg-purple-600 hover:bg-purple-700"
+              >
+                <Download className="w-5 h-5" />
+                Download All as ZIP
+              </button>
             </div>
           </div>
 
-          <ImageList images={images} onDownload={handleDownload} />
+          {/* Image List */}
+          <ImageList images={images} />
         </div>
       </div>
     </div>
