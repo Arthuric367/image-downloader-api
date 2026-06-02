@@ -1,5 +1,5 @@
 {
-  "name": "image-downloader-server",
+  "name": "image-downloader",
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
@@ -7,8 +7,12 @@
     "node": ">=18.0.0"
   },
   "scripts": {
+    "dev": "concurrently --names \"BACKEND,FRONTEND\" --prefix-colors \"cyan,magenta\" \"node index.js\" \"vite\"",
+    "dev:backend": "node index.js",
+    "dev:frontend": "vite",
     "start": "node index.js",
-    "dev": "node index.js"
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
     "archiver": "^6.0.1",
@@ -16,5 +20,13 @@
     "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
     "express": "^4.18.3"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.55",
+    "@types/react-dom": "^18.2.19",
+    "@vitejs/plugin-react": "^4.2.1",
+    "concurrently": "^8.2.2",
+    "typescript": "^5.2.2",
+    "vite": "^5.1.4"
   }
 }
