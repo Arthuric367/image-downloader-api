@@ -1,191 +1,200 @@
 import express from 'express';
-import axios from 'axios';
-import * as cheerio from 'cheerio';
+import puppeteer from 'puppeteer';
 import archiver from 'archiver';
-import { downloadWithRetry } from '../utils/download.js';
+import { randomUUID } from 'crypto';
 import { logError } from '../utils/error.js';
 
 const router = express.Router();
 
-const BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.5',
+// ─── In-memory session store ──────────────────────────────────────────────────
+// Each session holds the raw image bytes captured during browser rendering.
+// Images are served from here — no re-fetching, no expiry problems.
+const sessions = new Map();
+
+// Auto-expire sessions after 15 minutes to free memory
+setInterval(() => {
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  for (const [id, session] of sessions) {
+    if (session.createdAt < cutoff) sessions.delete(id);
+  }
+}, 5 * 60 * 1000);
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const CONTENT_TYPE_TO_EXT = {
+  'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png',
+  'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg',
+  'image/avif': 'avif', 'image/bmp': 'bmp',
 };
 
-function resolveUrl(src, base) {
-  if (!src || src.startsWith('data:') || src.startsWith('blob:')) return null;
-  try {
-    return new URL(src.trim(), base).href;
-  } catch {
-    return null;
-  }
+function getExt(contentType) {
+  const base = (contentType || '').split(';')[0].trim().toLowerCase();
+  return CONTENT_TYPE_TO_EXT[base] || 'jpg';
 }
 
-function parseSrcset(srcset, base) {
-  return srcset
-    .split(',')
-    .map(part => part.trim().split(/\s+/)[0])
-    .filter(Boolean)
-    .map(src => resolveUrl(src, base))
-    .filter(Boolean);
-}
-
+// ─── Fetch images using a real headless browser ───────────────────────────────
+// Puppeteer opens the page exactly like Chrome would. We intercept every image
+// response as it downloads — capturing the bytes immediately so signed/expiring
+// URLs are never a problem.
 router.post('/fetch-images', async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'URL is required' });
+
+  let browser;
   try {
-    const { url } = req.body;
-    if (!url) {
-      return res.status(400).json({ error: 'URL is required' });
-    }
-
-    const response = await axios.get(url, {
-      headers: BROWSER_HEADERS,
-      timeout: 30000,
-      maxRedirects: 5,
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+      ],
     });
 
-    const $ = cheerio.load(response.data);
-    const images = new Set();
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    );
 
-    const add = (src) => {
-      const resolved = resolveUrl(src, url);
-      if (resolved) images.add(resolved);
-    };
+    const capturedImages = [];
+    const seenUrls = new Set();
 
-    // <img> — src + common lazy-load data attributes + srcset
-    $('img').each((_, el) => {
-      const e = $(el);
-      ['src', 'data-src', 'data-lazy', 'data-original', 'data-lazy-src',
-       'data-hi-res', 'data-full', 'data-image'].forEach(attr => {
-        const v = e.attr(attr);
-        if (v) add(v);
-      });
-      const srcset = e.attr('srcset') || e.attr('data-srcset');
-      if (srcset) parseSrcset(srcset, url).forEach(u => images.add(u));
-    });
+    // Intercept every image response the browser receives
+    page.on('response', async (response) => {
+      try {
+        const ct = (response.headers()['content-type'] || '').split(';')[0].trim();
+        if (!ct.startsWith('image/')) return;
+        if (response.status() !== 200) return;
 
-    // <source> inside <picture>
-    $('source').each((_, el) => {
-      const srcset = $(el).attr('srcset') || $(el).attr('data-srcset');
-      if (srcset) parseSrcset(srcset, url).forEach(u => images.add(u));
-      const src = $(el).attr('src');
-      if (src) add(src);
-    });
+        const imgUrl = response.url();
+        if (imgUrl.startsWith('data:') || seenUrls.has(imgUrl)) return;
+        seenUrls.add(imgUrl);
 
-    // Open Graph / Twitter Card meta tags
-    $('meta').each((_, el) => {
-      const prop = $(el).attr('property') || $(el).attr('name') || '';
-      if (/og:image|twitter:image/.test(prop)) {
-        const content = $(el).attr('content');
-        if (content) add(content);
+        const buffer = await response.buffer();
+        if (buffer.length < 2048) return; // Skip tiny images under 2 KB (icons, trackers)
+
+        capturedImages.push({
+          id: capturedImages.length,
+          originalUrl: imgUrl,
+          contentType: ct,
+          data: buffer,
+          size: buffer.length,
+        });
+      } catch {
+        // Ignore errors for individual images — keep going
       }
     });
 
-    // Inline background-image styles (best-effort)
-    $('[style]').each((_, el) => {
-      const style = $(el).attr('style') || '';
-      const match = style.match(/url\(['"]?([^'")\s]+)['"]?\)/);
-      if (match) add(match[1]);
+    // Navigate and wait for the initial page load
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+
+    // Auto-scroll to trigger lazy-loaded images
+    await page.evaluate(async () => {
+      await new Promise((resolve) => {
+        let scrolled = 0;
+        const step = 500;
+        const timer = setInterval(() => {
+          window.scrollBy(0, step);
+          scrolled += step;
+          if (scrolled >= document.body.scrollHeight) {
+            clearInterval(timer);
+            window.scrollTo(0, 0);
+            resolve();
+          }
+        }, 150);
+      });
     });
 
-    res.json({ images: Array.from(images) });
-  } catch (error) {
-    logError(error, 'Fetch images error');
-    res.status(500).json({
-      error: 'Failed to fetch images',
-      details: error.message,
+    // Wait briefly for any remaining lazy-load responses to arrive
+    await new Promise(r => setTimeout(r, 2000));
+
+    await browser.close();
+    browser = null;
+
+    // Store captured images in session
+    const sessionId = randomUUID();
+    sessions.set(sessionId, { createdAt: Date.now(), images: capturedImages });
+
+    // Return metadata only — actual bytes stay on the server
+    res.json({
+      sessionId,
+      images: capturedImages.map(({ id, originalUrl, contentType, size }) => ({
+        id, originalUrl, contentType, size,
+      })),
     });
+  } catch (error) {
+    if (browser) await browser.close().catch(() => {});
+    logError(error, 'Fetch images error');
+    res.status(500).json({ error: 'Failed to fetch images', details: error.message });
   }
 });
 
-router.post('/download-all', async (req, res) => {
+// ─── Session endpoints ────────────────────────────────────────────────────────
+
+// Serve image preview (used by the <img> tag in the frontend)
+router.get('/session/:sid/image/:id', (req, res) => {
+  const session = sessions.get(req.params.sid);
+  if (!session) return res.status(410).json({ error: 'Session expired. Please extract again.' });
+  const img = session.images[Number(req.params.id)];
+  if (!img) return res.status(404).json({ error: 'Image not found' });
+  res.setHeader('Content-Type', img.contentType);
+  res.setHeader('Cache-Control', 'private, max-age=900');
+  res.send(img.data);
+});
+
+// Download a single image
+router.get('/session/:sid/download/:id', (req, res) => {
+  const session = sessions.get(req.params.sid);
+  if (!session) return res.status(410).json({ error: 'Session expired. Please extract again.' });
+  const img = session.images[Number(req.params.id)];
+  if (!img) return res.status(404).json({ error: 'Image not found' });
+  res.setHeader('Content-Type', img.contentType);
+  res.setHeader('Content-Disposition', `attachment; filename="image-${img.id + 1}.${getExt(img.contentType)}"`);
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+  res.send(img.data);
+});
+
+// Download a specific selection of images as ZIP
+router.post('/session/:sid/download-selected', async (req, res) => {
+  const session = sessions.get(req.params.sid);
+  if (!session) return res.status(410).json({ error: 'Session expired. Please extract again.' });
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids array is required' });
+  }
   try {
-    const { urls } = req.body;
-    if (!urls || !Array.isArray(urls) || urls.length === 0) {
-      return res.status(400).json({ error: 'URLs array is required' });
-    }
-
+    const selected = ids.map(id => session.images[id]).filter(Boolean);
     const archive = archiver('zip', { zlib: { level: 5 } });
-
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="images-${Date.now()}.zip"`);
-
     archive.pipe(res);
-
-    for (let i = 0; i < urls.length; i++) {
-      try {
-        const { data, ext } = await downloadWithRetry(urls[i]);
-        const fileName = `image-${String(i + 1).padStart(3, '0')}.${ext}`;
-        archive.append(data, { name: fileName });
-      } catch (error) {
-        console.error(`Skipping ${urls[i]}:`, error.message);
-      }
-    }
-
+    selected.forEach((img, i) => {
+      archive.append(img.data, { name: `image-${String(i + 1).padStart(3, '0')}.${getExt(img.contentType)}` });
+    });
     await archive.finalize();
   } catch (error) {
-    logError(error, 'Batch download error');
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: 'Failed to create zip file',
-        details: error.message,
-      });
-    }
+    logError(error, 'Download selected error');
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to create zip' });
   }
 });
 
-router.get('/download', async (req, res) => {
+// Download all images in the session as ZIP
+router.get('/session/:sid/download-all', async (req, res) => {
+  const session = sessions.get(req.params.sid);
+  if (!session) return res.status(410).json({ error: 'Session expired. Please extract again.' });
   try {
-    const { url } = req.query;
-    if (!url) {
-      return res.status(400).json({ error: 'URL is required' });
-    }
-
-    const { data, contentType, ext } = await downloadWithRetry(url);
-    const fileName = `image-${Date.now()}.${ext}`;
-
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
-
-    res.send(Buffer.from(data));
-  } catch (error) {
-    logError(error, 'Download error');
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: 'Failed to download image',
-        details: error.message,
-      });
-    }
-  }
-});
-
-// Proxy endpoint for image previews — lets the browser display images
-// from sites that block direct hotlinking by setting a matching Referer.
-router.get('/proxy-image', async (req, res) => {
-  const { url, referer } = req.query;
-  if (!url) return res.status(400).end();
-
-  try {
-    const headers = {
-      'User-Agent': BROWSER_HEADERS['User-Agent'],
-      'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-    };
-    if (referer) headers['Referer'] = referer;
-
-    const response = await axios.get(url, {
-      responseType: 'arraybuffer',
-      headers,
-      timeout: 15000,
-      maxRedirects: 5,
+    const archive = archiver('zip', { zlib: { level: 5 } });
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="images-${Date.now()}.zip"`);
+    archive.pipe(res);
+    session.images.forEach((img, i) => {
+      archive.append(img.data, { name: `image-${String(i + 1).padStart(3, '0')}.${getExt(img.contentType)}` });
     });
-
-    const contentType = response.headers['content-type'] || 'image/jpeg';
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.send(Buffer.from(response.data));
-  } catch {
-    res.status(404).end();
+    await archive.finalize();
+  } catch (error) {
+    logError(error, 'Download all error');
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to create zip' });
   }
 });
 

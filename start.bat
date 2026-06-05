@@ -20,6 +20,9 @@ if %errorlevel% neq 0 (
 :: Install dependencies if node_modules is missing
 if not exist "node_modules" (
     echo [SETUP] Installing dependencies...
+    echo [NOTE]  First install downloads Chromium (~170MB^) for Puppeteer.
+    echo         This only happens once. Please wait...
+    echo.
     call npm install
     if %errorlevel% neq 0 (
         echo [ERROR] npm install failed.
@@ -31,14 +34,14 @@ if not exist "node_modules" (
 
 :: Start the backend in a separate window
 echo [1/2] Starting backend server on http://localhost:5000
-start "ImageGrab - Backend" cmd /k "title ImageGrab Backend && node index.js"
+start "ImageGrab - Backend" cmd /k "title ImageGrab Backend && npm run dev:backend"
 
 :: Give backend a moment to bind the port
 timeout /t 2 /nobreak >nul
 
 :: Start the Vite frontend in a separate window
 echo [2/2] Starting frontend on http://localhost:5173
-start "ImageGrab - Frontend" cmd /k "title ImageGrab Frontend && npx vite"
+start "ImageGrab - Frontend" cmd /k "title ImageGrab Frontend && npm run dev:frontend"
 
 :: Wait a few seconds then open the browser
 echo.
